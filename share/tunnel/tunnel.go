@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/google/uuid"
 	"io"
 	"log"
 	"os"
@@ -18,7 +19,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-//Config a Tunnel
+// Config a Tunnel
 type Config struct {
 	*cio.Logger
 	Inbound   bool
@@ -27,13 +28,13 @@ type Config struct {
 	KeepAlive time.Duration
 }
 
-//Tunnel represents an SSH tunnel with proxy capabilities.
-//Both chisel client and server are Tunnels.
-//chisel client has a single set of remotes, whereas
-//chisel server has multiple sets of remotes (one set per client).
-//Each remote has a 1:1 mapping to a proxy.
-//Proxies listen, send data over ssh, and the other end of the ssh connection
-//communicates with the endpoint and returns the response.
+// Tunnel represents an SSH tunnel with proxy capabilities.
+// Both chisel client and server are Tunnels.
+// chisel client has a single set of remotes, whereas
+// chisel server has multiple sets of remotes (one set per client).
+// Each remote has a 1:1 mapping to a proxy.
+// Proxies listen, send data over ssh, and the other end of the ssh connection
+// communicates with the endpoint and returns the response.
 type Tunnel struct {
 	Config
 	//ssh connection
@@ -47,7 +48,7 @@ type Tunnel struct {
 	socksServer *socks5.Server
 }
 
-//New Tunnel from the given Config
+// New Tunnel from the given Config
 func New(c Config) *Tunnel {
 	c.Logger = c.Logger.Fork("tun")
 	t := &Tunnel{
@@ -68,7 +69,7 @@ func New(c Config) *Tunnel {
 	return t
 }
 
-//BindSSH provides an active SSH for use for tunnelling
+// BindSSH provides an active SSH for use for tunnelling
 func (t *Tunnel) BindSSH(ctx context.Context, c ssh.Conn, reqs <-chan *ssh.Request, chans <-chan ssh.NewChannel) error {
 	//link ctx to ssh-conn
 	go func() {
@@ -104,7 +105,7 @@ func (t *Tunnel) BindSSH(ctx context.Context, c ssh.Conn, reqs <-chan *ssh.Reque
 	return err
 }
 
-//getSSH blocks while connecting
+// getSSH blocks while connecting
 func (t *Tunnel) getSSH(ctx context.Context) ssh.Conn {
 	//cancelled already?
 	if isDone(ctx) {
@@ -140,8 +141,8 @@ func (t *Tunnel) activatingConnWait() <-chan struct{} {
 	return ch
 }
 
-//BindRemotes converts the given remotes into proxies, and blocks
-//until the caller cancels the context or there is a proxy error.
+// BindRemotes converts the given remotes into proxies, and blocks
+// until the caller cancels the context or there is a proxy error.
 func (t *Tunnel) BindRemotes(ctx context.Context, remotes []*settings.Remote) error {
 	if len(remotes) == 0 {
 		return errors.New("no remotes")
@@ -174,17 +175,64 @@ func (t *Tunnel) BindRemotes(ctx context.Context, remotes []*settings.Remote) er
 
 func (t *Tunnel) keepAliveLoop(sshConn ssh.Conn) {
 	//ping forever
+	//reply_timeout set to KeepAlive interval, if KeepAlive is less than 10s, set reply_timeout to 10s
+	//maybe a new config option for reply_timeout is also fine
+	//refMem := currentMemoryStats()
+
+	reply_timeout := t.Config.KeepAlive
+
+	//if reply_timeout < 10*time.Second {
+	//      reply_timeout = 10 * time.Second
+	//}
+	reply_timeout = 2 * time.Second
 	for {
+		aliveId := uuid.NewString()
+		t.Debugf("%s: Sleeping for %v", aliveId, t.Config.KeepAlive)
 		time.Sleep(t.Config.KeepAlive)
-		_, b, err := sshConn.SendRequest("ping", true, nil)
+
+		errChannel := make(chan error, 2)
+
+		t.Debugf("%s: Set timeout to %v", aliveId, reply_timeout)
+		tt := time.AfterFunc(reply_timeout, func() {
+			t.Debugf("%s: Send timeout after %v", aliveId, reply_timeout)
+			errChannel <- errors.New("KEEPALIVE REPLY TIMEOUT ERROR")
+		})
+
+		go func() {
+			t.Debugf("%s: Send ping request", aliveId)
+			_, b, err := sshConn.SendRequest("ping", true, nil)
+			t.Debugf("%s: Finished ping request: err = %v", aliveId, err)
+
+			retErr := err
+
+			if err == nil && len(b) > 0 && !bytes.Equal(b, []byte("pong")) {
+				t.Debugf("%s: strange ping response", aliveId)
+				retErr = errors.New("strange ping response")
+			}
+
+			t.Debugf("%s: Sending response on channel", aliveId)
+			errChannel <- retErr
+			t.Debugf("%s: Done Sending for a response on channel", aliveId)
+		}()
+
+		t.Debugf("%s: Waiting response on channel", aliveId)
+		err := <-errChannel
+		t.Debugf("%s: End Waiting response on channel: %v", aliveId, err)
+
+		tt.Stop()
+
 		if err != nil {
+			t.Debugf("%s: Received an error, breaking: %v", aliveId, err)
 			break
 		}
-		if len(b) > 0 && !bytes.Equal(b, []byte("pong")) {
-			t.Debugf("strange ping response")
-			break
-		}
+		t.Debugf("%s: No error, continuing...", aliveId)
 	}
 	//close ssh connection on abnormal ping
-	sshConn.Close()
+	t.Debugf("Closing ssh connection...")
+	err := sshConn.Close()
+	if err != nil {
+		t.Debugf("Error closing ssh connection... %v", err)
+		return
+	}
+	t.Debugf("Ssh connection closed...")
 }
