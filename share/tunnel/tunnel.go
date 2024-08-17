@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/armon/go-socks5"
+	"github.com/armon/go-socks5"
 	"github.com/jpillora/chisel/share/cio"
 	"github.com/jpillora/chisel/share/cnet"
 	"github.com/jpillora/chisel/share/settings"
