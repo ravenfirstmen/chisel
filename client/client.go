@@ -187,6 +187,9 @@ func NewClient(c *Config) (*Client, error) {
 		Socks:     hasReverse && hasSocks,
 		KeepAlive: client.config.KeepAlive,
 	})
+
+	client.Logger.Debugf("HELLO THERE!!!. Client created successfully!")
+
 	return client, nil
 }
 
